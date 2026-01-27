@@ -1,0 +1,85 @@
+name: Website Link Check
+
+on:
+  schedule:
+    # Run daily at 01:00 UTC
+    - cron: '0 1 * * *'
+  workflow_dispatch: # Allow manual trigger
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  linkcheck:
+    name: Check documentation website links
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install linkcheck
+        run: |
+          curl -sL https://github.com/filiph/linkcheck/releases/download/3.0.0/linkcheck-3.0.0-linux-x64.tar.gz | tar xvzf - linkcheck/linkcheck --strip 1
+
+      - name: Check links
+        id: linkcheck
+        run: |
+          ./linkcheck --no-nice https://kueue.sigs.k8s.io/ 2>&1 | tee linkcheck-output.txt
+          exit_code=${PIPESTATUS[0]}
+          echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
+          exit $exit_code
+        continue-on-error: true
+
+      - name: Create issue if links are broken
+        if: steps.linkcheck.outcome == 'failure' && github.event_name == 'schedule'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const output = fs.readFileSync('linkcheck-output.txt', 'utf8');
+            const truncatedOutput = output.length > 60000 ? output.substring(0, 60000) + '\n\n... (truncated)' : output;
+
+            const title = 'Broken links detected in website documentation';
+            const body = `Automated link check found broken links on https://kueue.sigs.k8s.io/
+
+            **Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            **Date:** ${new Date().toISOString()}
+
+            <details>
+            <summary>Linkcheck output</summary>
+
+            \`\`\`
+            ${truncatedOutput}
+            \`\`\`
+
+            </details>
+
+            Please review and fix the broken links.`;
+
+            // Check if issue already exists
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'kind/documentation'
+            });
+
+            const existingIssue = issues.data.find(issue => issue.title === title);
+
+            if (!existingIssue) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: title,
+                body: body,
+                labels: ['kind/documentation']
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existingIssue.number,
+                body: `Broken links still detected.\n\n${body}`
+              });
+            }
+      - name: Fail if links are broken
+        if: steps.linkcheck.outcome == 'failure'
+        run: exit 1
